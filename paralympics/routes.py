@@ -1,6 +1,9 @@
-from flask import current_app as app, request, make_response
+from flask import current_app as app, request, make_response,abort,jsonify
 from marshmallow import ValidationError
-
+from marshmallow.exceptions import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import exists
+import pytest
 from paralympics import db
 from paralympics.models import Region, Event
 from paralympics.schemas import RegionSchema, EventSchema
@@ -10,6 +13,43 @@ regions_schema = RegionSchema(many=True)
 region_schema = RegionSchema()
 events_schema = EventSchema(many=True)
 event_schema = EventSchema()
+
+@app.errorhandler(404)
+def resource_not_found(e):
+
+    return jsonify(error=str(e)), 404
+
+@app.errorhandler(ValidationError)
+def register_validation_error(error):
+    """ Error handler for marshmallow schema validation errors.
+
+    Args:
+        error (ValidationError): Marshmallow error.
+    Returns:
+        HTTP response with the validation error message and the 400 status code
+    """
+    response = error.messages
+    return response, 400
+
+@pytest.fixture(scope='function')
+def new_region(app):
+    """Create a new region and add to the database.
+
+    Adds a new Region to the database and also returns an instance of that Region object.
+    """
+    new_region = Region(NOC='NEW', notes=None, region='A new region')
+    with app.app_context():
+        db.session.add(new_region)
+        db.session.commit()
+
+    yield new_region
+
+    # Remove the region from the database at the end of the test if it still exists
+    with app.app_context():
+        region_exists = db.session.query(exists().where(Region.NOC == 'NEW')).scalar()
+        if region_exists:
+            db.session.delete(new_region)
+            db.session.commit()
 
 
 @app.get("/regions")
@@ -30,16 +70,21 @@ def get_regions():
 def get_region(code):
     """ Returns one region in JSON.
 
-    :param code: The NOC code of the region to return
-    :param type code: str
-    :returns: JSON
+    Returns 404 if the region code is not found in the database.
+
+    Args:
+        code (str): The 3 digit NOC code of the region to be searched for
+    Returns: 
+        JSON for the region if found otherwise 404
     """
-    # Query structure shown at https://flask-sqlalchemy.palletsprojects.com/en/3.1.x/queries/#select
-    region = db.session.execute(db.select(Region).filter_by(NOC=code)).scalar_one()
-    # Dump the data using the Marshmallow region schema; '.dump()' returns JSON.
-    result = region_schema.dump(region)
-    # Return the data in the HTTP response
-    return result
+    # Try to find the region, if it is not found, catch the error and return 404
+    try:
+        region = db.session.execute(db.select(Region).filter_by(NOC=code)).scalar_one()
+        result = region_schema.dump(region)
+        return result
+    except SQLAlchemyError as e:
+        # See https://flask.palletsprojects.com/en/2.3.x/errorhandling/#returning-api-errors-as-json
+        abort(404, description="Region not found.")
 
 
 @app.get("/events")
